@@ -95,9 +95,9 @@ server.get("/participants", async (req, res) => {
 
 server.post("/messages", async (req, res) => {
   const message = req.body;
-  const { from } = req.headers;
+  const { user } = req.headers;
 
-  console.log(from)
+  console.log(user)
 
   const messageSchema = joi.object({
     to: joi.string().required(),
@@ -114,7 +114,7 @@ server.post("/messages", async (req, res) => {
   }
 
   try {
-    const participanteExiste = await db.collection("participantes").findOne({ name: from });
+    const participanteExiste = await db.collection("participantes").findOne({ name: user });
 
     if (!participanteExiste) {
       return res.status(422).send("Usuário não faz parte do grupo");
@@ -124,7 +124,7 @@ server.post("/messages", async (req, res) => {
 
     const novaMensagem = {
       ...message,
-      from,
+      from: user,
       time,
     };
 
@@ -137,13 +137,44 @@ server.post("/messages", async (req, res) => {
 });
 
 server.get("/messages", async (req, res) => {
-  try {
-    const dados = await db.collection("messages").find().toArray();
-    console.log(dados);
+  const { limit } = req.query;
+  const user = req.headers.user; // Obtendo o valor do header "User"
 
-    return res.send(dados);
+  try {
+    // Filtro ajustado para buscar apenas as mensagens relevantes para o usuário
+    const filtro = {
+      $or: [
+        { type: "status" }, // Mensagens de status
+        { from: user }, // Mensagens enviadas pelo usuário
+        { to: user }, // Mensagens privadas enviadas ao usuário
+        { to: 'Todos' } // Mensagens públicas enviadas para todos
+      ]
+    };
+
+    let mensagens;
+
+    if (!limit) {
+      mensagens = await db
+        .collection("messages")
+        .find(filtro)
+        .sort({ _id: -1 }) // Ordena em ordem decrescente de inserção
+        .toArray();
+    } else {
+      const limitNum = parseInt(limit);
+      mensagens = await db
+        .collection("messages")
+        .find(filtro)
+        .sort({ _id: -1 })
+        .limit(limitNum)
+        .toArray();
+    }
+
+    console.log("mensagens", mensagens);
+
+    return res.send(mensagens);
   } catch (error) {
-    res.status(500).send("Deu erro no servidor de banco de dados");
+    console.log("Erro ao buscar mensagens:", error);
+    res.status(500).send("Erro no servidor");
   }
 });
 
