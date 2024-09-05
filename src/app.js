@@ -20,8 +20,9 @@ server.use((req, res, next) => {
   next();
 });
 
-
 let db;
+const CHECK_INTERVAL = 15000; // 15 segundos
+const TIMEOUT_THRESHOLD = 10000; // 10 segundos
 
 async function startServer() {
   try {
@@ -35,6 +36,45 @@ async function startServer() {
   server.listen(process.env.PORT, () => {
     console.log(`Servidor funcionando na porta ${process.env.PORT}`);
   });
+
+  setInterval(removeInactiveParticipants, CHECK_INTERVAL);
+}
+
+async function removeInactiveParticipants() {
+  const now = Date.now();
+  const threshold = now - TIMEOUT_THRESHOLD;
+
+  try {
+    // Encontrar participantes inativos (lastStatus mais antigo que o threshold)
+    const inactiveParticipants = await db
+      .collection("participantes")
+      .find({ lastStatus: { $lt: threshold } })
+      .toArray();
+
+    if (inactiveParticipants.length > 0) {
+      // Remover os participantes inativos
+      const inactiveParticipantNames = inactiveParticipants.map(p => p.name);
+
+      await db.collection("participantes").deleteMany({
+        name: { $in: inactiveParticipantNames }
+      });
+
+      // Inserir uma mensagem para cada participante removido
+      const exitMessages = inactiveParticipants.map(p => ({
+        from: p.name,
+        to: "Todos",
+        text: "sai da sala...",
+        type: "status",
+        time: dayjs().format("HH:mm:ss")
+      }));
+
+      await db.collection("messages").insertMany(exitMessages);
+
+      console.log(`${inactiveParticipants.length} participante(s) removido(s):`, inactiveParticipantNames);
+    }
+  } catch (error) {
+    console.log("Erro ao remover participantes inativos:", error);
+  }
 }
 
 server.post("/participants", async (req, res) => {
@@ -56,11 +96,9 @@ server.post("/participants", async (req, res) => {
 
     if (participanteExiste) return res.status(409).send("Este usuário já existe!");
 
-    const lastStatus = Date.now();
-
     const participanteComStatus = {
       name: participante.name,
-      lastStatus // utilize o timestamp original
+      lastStatus: Date.now() // utilize o timestamp atual
     };
 
     await db.collection("participantes").insertOne(participanteComStatus);
@@ -70,7 +108,7 @@ server.post("/participants", async (req, res) => {
       to: 'Todos',
       text: 'entra na sala...',
       type: 'status',
-      time: dayjs(lastStatus).format('HH:mm:ss') // Aqui o tempo formatado
+      time: dayjs().format('HH:mm:ss') // Aqui o tempo formatado
     };
 
     await db.collection("messages").insertOne(message);
@@ -97,15 +135,12 @@ server.post("/messages", async (req, res) => {
   const message = req.body;
   const { user } = req.headers;
 
-  console.log(user)
-
   const messageSchema = joi.object({
     to: joi.string().required(),
     text: joi.string().required(),
     type: joi.string().valid("message", "private_message").required(),
   });
 
-  // Validação do objeto message diretamente
   const validation = messageSchema.validate(message);
 
   if (validation.error) {
@@ -131,49 +166,57 @@ server.post("/messages", async (req, res) => {
     await db.collection("messages").insertOne(novaMensagem);
     res.sendStatus(201);
   } catch (error) {
-    console.log("Erro ao inserir participante e/ou mensagem:", error);
+    console.log("Erro ao inserir mensagem:", error);
     res.status(500).send("Erro no servidor");
   }
 });
 
 server.get("/messages", async (req, res) => {
   const { limit } = req.query;
-  const user = req.headers.user; // Obtendo o valor do header "User"
+  const user = req.headers.user; 
 
   try {
-    // Filtro ajustado para buscar apenas as mensagens relevantes para o usuário
     const filtro = {
       $or: [
-        { type: "status" }, // Mensagens de status
-        { from: user }, // Mensagens enviadas pelo usuário
-        { to: user }, // Mensagens privadas enviadas ao usuário
-        { to: 'Todos' } // Mensagens públicas enviadas para todos
+        { type: "status" },
+        { from: user },
+        { to: user },
+        { to: 'Todos' }
       ]
     };
 
     let mensagens;
 
     if (!limit) {
-      mensagens = await db
-        .collection("messages")
-        .find(filtro)
-        .sort({ _id: -1 }) // Ordena em ordem decrescente de inserção
-        .toArray();
+      mensagens = await db.collection("messages").find(filtro).sort({ _id: -1 }).toArray();
     } else {
       const limitNum = parseInt(limit);
-      mensagens = await db
-        .collection("messages")
-        .find(filtro)
-        .sort({ _id: -1 })
-        .limit(limitNum)
-        .toArray();
+      mensagens = await db.collection("messages").find(filtro).sort({ _id: -1 }).limit(limitNum).toArray();
     }
-
-    console.log("mensagens", mensagens);
 
     return res.send(mensagens);
   } catch (error) {
-    console.log("Erro ao buscar mensagens:", error);
+    res.status(500).send("Erro no servidor");
+  }
+});
+
+server.post("/status", async (req, res) => {
+  const { user } = req.headers;
+
+  try {
+    const usuarioExistente = await db.collection("participantes").findOne({ name: user });
+
+    if (!usuarioExistente) {
+      return res.sendStatus(404);
+    }
+
+    await db.collection("participantes").updateOne(
+      { name: user },
+      { $set: { lastStatus: Date.now() } }
+    );
+
+    return res.sendStatus(200);
+  } catch (error) {
     res.status(500).send("Erro no servidor");
   }
 });
